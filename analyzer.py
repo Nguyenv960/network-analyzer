@@ -42,6 +42,9 @@ result = subprocess.run(
 lines = result.stdout.splitlines()
 packet_rows = lines[1:]
 packet_count = len(packet_rows)
+#empty-capture protection:
+if packet_count == 0:
+    raise SystemExit("No packets found in capture. Nothing to analyze")
 
 #byte count loop
 total_bytes = 0
