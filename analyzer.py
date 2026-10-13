@@ -1,6 +1,7 @@
 import subprocess
 import shutil
 from pathlib import Path
+from rules import check_packet_burst
 
 #checks os system to ensure that tshark is installed correctly
 tshark_path = shutil.which("tshark")
@@ -64,6 +65,11 @@ duration_seconds = last_time - first_time
 
 avg_packets_per_second = packet_count / duration_seconds
 
+if duration_seconds > 0:
+    avg_packets_per_second = packet_count / duration_seconds
+else:
+    avg_packets_per_second = None
+
 #count dictionary
 packets_by_second = {}
 
@@ -78,16 +84,13 @@ for row in packet_rows:
 print("Packets processed:", packet_count)
 print("Total frame bytes:", total_bytes)
 print("Duration in seconds:", duration_seconds)
-print(f"avg_packets_per_second:{avg_packets_per_second:.2f}")
 
-print("Packets in windows 0:", packets_by_second.get(0,0))
+if avg_packets_per_second is None:
+    print("Average packets per second: unavailable (zero-duration capture)")
+else:
+    print(f"Average packets per second:{avg_packets_per_second:.2f}")
+
 print("Packets across all windows:", sum(packets_by_second.values()))
-
-    #packets per second
-print("\nPackets per one-second window:")
-for second in sorted(packets_by_second):
-    count = packets_by_second[second]
-    print(f"Window {second} : {count} packets")
 
 #find busiest window automatically
 busiest_second = None
@@ -99,9 +102,55 @@ for second in sorted(packets_by_second):
     if count > highest_packet_count:
         highest_packet_count = count
         busiest_second = second
-print("Busiest window:", busiest_second)
-print("Packets in busiest window:", highest_packet_count)
 
 window_end = busiest_second + 1
 
-print(f"Wireshark filter: frame.timerelative >= {busiest_second} and frame.time_relative < {window_end}")
+#add traceability
+
+first_frame = None
+last_frame = None
+
+
+for row in packet_rows:
+    fields = row.split("\t")
+    frame_number = int(fields[0])
+    packet_time = float(fields[1])
+    second = int(packet_time)
+
+    if second == busiest_second:
+        if first_frame is None:
+            first_frame = frame_number
+        last_frame = frame_number
+
+busiest_window_percentage = (highest_packet_count/packet_count) * 100
+
+#dictionary of results:
+busiest_window_summary = {
+    "start_second": busiest_second,
+    "end_second"  : window_end,
+    "packet_count": highest_packet_count,
+    "percentage_of_capture": busiest_window_percentage,
+    "first_frame": first_frame,
+    "last_frame": last_frame,
+}
+def print_window_summary(summary):
+    print("\nBusiest traffic window")
+    print(f"Time: {summary['start_second']}-{summary['end_second']} seconds")
+    print(f"Packets: {summary['packet_count']} ({summary['percentage_of_capture']:.2f}% of capture)")
+    print(f"Frames: {summary['first_frame']}-{summary['last_frame']}")
+
+print_window_summary(busiest_window_summary)
+
+print(f"Wireshark filter: frame.time_relative >= {busiest_second} and frame.time_relative < {window_end}") 
+
+#rules: packet burst threshold
+packet_burst_threshold = 1000
+
+burst_detected = check_packet_burst(busiest_window_summary, packet_burst_threshold)
+
+if burst_detected:
+    print("\n[ALERT] High packet volume")
+    print(f"Reason: {busiest_window_summary["packet_count"]} packets in the busiest one-second window; threshold is {packet_burst_threshold}")
+else:
+    print("\n No packet-volume alert triggered")
+
