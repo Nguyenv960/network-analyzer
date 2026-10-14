@@ -1,7 +1,7 @@
 import subprocess
 import shutil
 from pathlib import Path
-from rules import check_packet_burst, check_syn_volume
+from rules import check_packet_burst, check_syn_volume, check_distinct_ports
 
 #checks os system to ensure that tshark is installed correctly
 tshark_path = shutil.which("tshark")
@@ -35,6 +35,9 @@ command = [
     "-e", "ip.src", #sender packet address
     "-e", "tcp.flags.syn", #was TCP SYN flag set?
     "-e","tcp.flags.ack", #was TCP ACK flag set?
+
+    "-e", "ip.dst", #ip destination
+    "-e", "tcp.dstport" #tcp port destination
 ]
 
 result = subprocess.run(
@@ -76,24 +79,35 @@ else:
 #count dictionary
 packets_by_second = {}
 syn_counts = {}
+ports_by_target = {}
 for row in packet_rows:
     fields = row.split("\t")
     packet_time = float(fields[1])
     second = int(packet_time)
 
-    #for TCP w/o ACK
+    previous_count = packets_by_second.get(second, 0)
+    packets_by_second[second] = previous_count + 1
+
     source_ip = fields[3]
     syn_flag = fields[4]
     ack_flag = fields[5]
+    dest_ip = fields[6]
+    dest_port = fields[7]
+
+    #for TCP w/o ACK      
     is_syn_without_ack = syn_flag == "True" and ack_flag == "False"
-    
+  
     if is_syn_without_ack and source_ip != "":
         key = (source_ip, second)
         previous_syn_count = syn_counts.get(key,0)
         syn_counts[key] = previous_syn_count + 1
-        
-    previous_count = packets_by_second.get(second, 0)
-    packets_by_second[second] = previous_count + 1
+        #ip source/destination
+        port_key = (source_ip, dest_ip, second)
+        if port_key not in ports_by_target:
+            ports_by_target[port_key] = set()
+        ports_by_target[port_key].add(dest_port)
+
+   
 #print statements
 print("Packets processed:", packet_count)
 print("Total frame bytes:", total_bytes)
@@ -180,3 +194,17 @@ for key, count in syn_counts.items():
         print(f"Source: {source_ip}")
         print(f"Time: {second}-{second+1} seconds")
         print(f"Reason: {count} SYN-without-ACK packets; threshold is {syn_threshold}")
+
+#rule: distinct-port loop
+distinct_port_threshold = 1
+for port_key, ports in ports_by_target.items():
+    source_ip, dest_ip, second = port_key
+    distinct_port_count = len(ports)
+    triggered = check_distinct_ports(distinct_port_count, distinct_port_threshold)
+    if triggered:
+        print(f"\n[ALERT] Distinct destination-port threshold reached")
+        print(f"Source: {source_ip}")
+        print(f"Destination: {dest_ip}")
+        print(f"Destination ports:", ports)
+        print(f"Time: {second}-{second+1} seconds")
+        print(f"Reason: {distinct_port_count} distinct destination ports in SYN-without-ACK packets; threshold is {distinct_port_threshold}")
