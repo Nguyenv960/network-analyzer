@@ -1,7 +1,7 @@
 import subprocess
 import shutil
 from pathlib import Path
-from rules import check_packet_burst
+from rules import check_packet_burst, check_syn_volume
 
 #checks os system to ensure that tshark is installed correctly
 tshark_path = shutil.which("tshark")
@@ -31,6 +31,10 @@ command = [
     "-e", "frame.time_relative",
     "-e", "frame.len",
     "-E", "header=y",
+
+    "-e", "ip.src", #sender packet address
+    "-e", "tcp.flags.syn", #was TCP SYN flag set?
+    "-e","tcp.flags.ack", #was TCP ACK flag set?
 ]
 
 result = subprocess.run(
@@ -39,7 +43,6 @@ result = subprocess.run(
     text = True,
     check = True,
 )
-
 lines = result.stdout.splitlines()
 packet_rows = lines[1:]
 packet_count = len(packet_rows)
@@ -72,18 +75,30 @@ else:
 
 #count dictionary
 packets_by_second = {}
-
+syn_counts = {}
 for row in packet_rows:
     fields = row.split("\t")
     packet_time = float(fields[1])
     second = int(packet_time)
 
+    #for TCP w/o ACK
+    source_ip = fields[3]
+    syn_flag = fields[4]
+    ack_flag = fields[5]
+    is_syn_without_ack = syn_flag == "True" and ack_flag == "False"
+    
+    if is_syn_without_ack and source_ip != "":
+        key = (source_ip, second)
+        previous_syn_count = syn_counts.get(key,0)
+        syn_counts[key] = previous_syn_count + 1
+        
     previous_count = packets_by_second.get(second, 0)
     packets_by_second[second] = previous_count + 1
 #print statements
 print("Packets processed:", packet_count)
 print("Total frame bytes:", total_bytes)
 print("Duration in seconds:", duration_seconds)
+print("SYN counts:", syn_counts)
 
 if avg_packets_per_second is None:
     print("Average packets per second: unavailable (zero-duration capture)")
@@ -154,3 +169,14 @@ if burst_detected:
 else:
     print("\n No packet-volume alert triggered")
 
+#rule: SYN without ACK volume
+syn_threshold = 2
+
+for key, count in syn_counts.items():
+    source_ip, second = key
+    triggered = check_syn_volume(count, syn_threshold)
+    if triggered:
+        print("\n[ALERT] High TCP SYN volume")
+        print(f"Source: {source_ip}")
+        print(f"Time: {second}-{second+1} seconds")
+        print(f"Reason: {count} SYN-without-ACK packets; threshold is {syn_threshold}")
